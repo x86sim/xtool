@@ -77,7 +77,11 @@ public struct AutoSigner {
             let relative = Array(url.standardizedFileURL.pathComponents.dropFirst(rootComponents.count))
             if relative.count == 2, relative[0] == "Watch" {
                 nsDict["WKCompanionAppBundleIdentifier"] = mainInfo.newBundleID
-                nsDict.removeObject(forKey: "WKWatchOnly")
+                // Not watch-only any more; installd refuses both keys together.
+                if nsDict["WKWatchOnly"] != nil {
+                    nsDict.removeObject(forKey: "WKWatchOnly")
+                    nsDict["WKRunsIndependentlyOfCompanionApp"] = true
+                }
             } else if relative.count == 4, relative[0] == "Watch",
                       let watchInfo = provisioningDict[url.deletingLastPathComponent().deletingLastPathComponent()],
                       var ext = nsDict["NSExtension"] as? [String: Any],
