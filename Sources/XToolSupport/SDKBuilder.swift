@@ -79,8 +79,9 @@ struct SDKBuilder {
     // bump this when the sdk builder logic changes
     static let sdkEpoch = 5
 
-    // tag from https://github.com/xtool-org/darwin-tools-linux-llvm
-    static let darwinToolsVersion = "1.1.0"
+    // tag from https://github.com/x86sim/darwin-tools-linux-llvm: xtool-org's 1.1.0
+    // with lld chained fixups for arm64_32 (watchOS), as ld64 links them
+    static let darwinToolsVersion = "1.1.0-x86sim.1"
     // tag from https://github.com/xtool-org/OpenAppleMacros
     static let oamVersion = "1.4.1"
 
@@ -354,7 +355,7 @@ struct SDKBuilder {
     private func installToolset(in output: URL) async throws {
         let toolsetDir = output.appendingPathComponent("toolset")
         let url = URL(string: """
-        https://github.com/xtool-org/darwin-tools-linux-llvm/releases/download/\
+        https://github.com/x86sim/darwin-tools-linux-llvm/releases/download/\
         v\(Self.darwinToolsVersion)/toolset-\(arch.rawValue).tar.gz
         """)!
         try await fetchTarball(
