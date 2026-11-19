@@ -26,9 +26,14 @@ extension ProvisioningIdentifiers {
         return "\(Self.idPrefix)\(uuid).\(sanitized)"
     }
 
+    /// How an app's identifiers (and its extensions') are registered.
+    enum Mode: Sendable { case exact, prefixed }
+
     /// Whether to register identifiers exactly as the project spells them, like Xcode.
-    /// xtool's default prefix (XTL-<id>.) only avoids collisions with identifiers another
-    /// team owns; the exact identifier is tried first and the prefix is the fallback.
+    /// xtool's prefix (XTL-<id>.) only avoids collisions with identifiers another team owns.
+    /// The exact identifier when the team has it or has neither form; an app only registered
+    /// with the prefix (installed by xtool before) keeps it; the prefix when Apple refuses the
+    /// exact identifier (another team has it). An app's extensions follow the app.
     /// XTOOL_PREFIX_IDS=1 always prefixes, as xtool did before.
     static var preferExactIdentifiers: Bool {
         ProcessInfo.processInfo.environment["XTOOL_PREFIX_IDS"] != "1"
@@ -42,6 +47,13 @@ extension ProvisioningIdentifiers {
         var id = groupID.rawValue
         if id.hasPrefix(Self.groupPrefix) { id.removeFirst(Self.groupPrefix.count) }
         return sanitize(identifier: id)
+    }
+
+    /// Whether a registered group was named by xtool (group.XTL-<id>.…).
+    static func isPrefixed(groupID: DeveloperServicesAppGroup.GroupID) -> Bool {
+        var id = groupID.rawValue
+        if id.hasPrefix(Self.groupPrefix) { id.removeFirst(Self.groupPrefix.count) }
+        return id.hasPrefix(Self.idPrefix)
     }
 
     static func groupID(fromSanitized sanitized: String, context: SigningContext) -> DeveloperServicesAppGroup.GroupID {

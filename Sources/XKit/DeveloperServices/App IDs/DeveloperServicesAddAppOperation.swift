@@ -17,6 +17,8 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
     public enum Error: LocalizedError, CustomStringConvertible {
         case invalidApp(URL)
         case tooManyAppGroups(bundleID: String, groups: [DeveloperServicesAppGroup.GroupID])
+        /// Apple refused to register the identifier as written (another team has it).
+        case identifierUnavailable(String)
 
         public var errorDescription: String? {
             description
@@ -31,6 +33,8 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
                 App '\(bundleID)' requests multiple app groups: \(groups.map(\.rawValue).joined(separator: ", ")), \
                 which is not permitted when using a free team.
                 """
+            case .identifierUnavailable(let identifier):
+                "The identifier '\(identifier)' is not available to this team"
             }
         }
     }
@@ -48,26 +52,28 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
     private func upsertApp(
         bundleID: String,
         entitlements: Entitlements,
-        isFreeTeam: Bool
+        isFreeTeam: Bool,
+        mode: ProvisioningIdentifiers.Mode
     ) async throws -> Components.Schemas.BundleId {
         let prefixedBundleID = ProvisioningIdentifiers.identifier(fromSanitized: bundleID, context: self.context)
-        let exact = ProvisioningIdentifiers.preferExactIdentifiers
+        let wanted = mode == .exact ? bundleID : prefixedBundleID
 
-        let registered = try await context.developerAPIClient
-            .bundleIdsGetCollection(query: .init(
-                filter_lbrack_identifier_rbrack_: exact ? [bundleID, prefixedBundleID] : [bundleID]
-            ))
-            .ok.body.json.data
-        // filter[identifier] is a prefix filter so we need to manually upgrade to equality
-        func registeredID(_ identifier: String) -> Components.Schemas.BundleId? {
-            registered.first { $0.attributes?.identifier == identifier }
+        // List every App ID and match locally: filter[identifier] is a prefix filter, and
+        // free teams hold only a handful of IDs.
+        let registered = try await DeveloperAPIPages(\.links.next) {
+            try await context.developerAPIClient.bundleIdsGetCollection().ok.body.json
         }
+        .map(\.data)
+        .reduce(into: [], +=)
 
-        func create(_ identifier: String) async throws -> Components.Schemas.BundleId {
-            let name = identifier == bundleID
+        let appID: Components.Schemas.BundleId
+        if let existing = registered.first(where: { $0.attributes?.identifier == wanted }) {
+            appID = existing
+        } else {
+            let name = mode == .exact
                 ? ProvisioningIdentifiers.safeify(identifier: bundleID)
                 : ProvisioningIdentifiers.appName(fromSanitized: bundleID)
-            let createResponse = try await context.developerAPIClient.bundleIdsCreateInstance(
+            let response = try await context.developerAPIClient.bundleIdsCreateInstance(
                 body: .json(
                     .init(
                         data: .init(
@@ -75,27 +81,17 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
                             attributes: .init(
                                 name: name,
                                 platform: .init(.ios),
-                                identifier: identifier
+                                identifier: wanted
                             )
                         )
                     )
                 )
             )
-            return try createResponse.created.body.json.data
-        }
-
-        // The exact identifier when the team has it (e.g. registered by Xcode) or can
-        // register it, so the app installs over the Xcode-built one; an earlier
-        // prefixed registration keeps existing xtool installs and their data.
-        let appID: Components.Schemas.BundleId
-        if exact, let existing = registeredID(bundleID) {
-            appID = existing
-        } else if let existing = registeredID(prefixedBundleID) {
-            appID = existing
-        } else if exact, let created = try? await create(bundleID) {
-            appID = created
-        } else {
-            appID = try await create(prefixedBundleID)
+            if case .conflict = response, mode == .exact {
+                // Another team owns the identifier.
+                throw Error.identifierUnavailable(wanted)
+            }
+            appID = try response.created.body.json.data
         }
 
         let existingCapabilitiesList = try await context.developerAPIClient
@@ -189,7 +185,8 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
 
     private func addApp(
         _ app: URL,
-        isFreeTeam: Bool
+        isFreeTeam: Bool,
+        mode: ProvisioningIdentifiers.Mode
     ) async throws -> ProvisioningInfo {
         let infoURL = app.appendingPathComponent("Info.plist")
         guard let data = try? Data(contentsOf: infoURL),
@@ -221,7 +218,7 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
             entitlements = try Entitlements(entitlements: [])
         }
 
-        let appID = try await upsertApp(bundleID: bundleID, entitlements: entitlements, isFreeTeam: isFreeTeam)
+        let appID = try await upsertApp(bundleID: bundleID, entitlements: entitlements, isFreeTeam: isFreeTeam, mode: mode)
         let newBundleID = appID.attributes!.identifier!
 
         let teamID = try signingInfo.certificate.teamID()
@@ -280,13 +277,54 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
 
         let isFreeTeam = try await context.auth.team()?.isFree == true
 
-        return try await withThrowingTaskGroup(
+        // The app decides exact vs prefixed identifiers; its extensions follow it, since an
+        // extension's identifier must start with the app's.
+        let rootMode = try await identifierMode(for: root)
+        let rootInfo: ProvisioningInfo
+        do {
+            rootInfo = try await addApp(root, isFreeTeam: isFreeTeam, mode: rootMode)
+        } catch Error.identifierUnavailable where rootMode == .exact {
+            return try await provision(apps: apps, isFreeTeam: isFreeTeam, mode: .prefixed)
+        }
+        let extensions = Array(apps.dropFirst())
+        var result = try await provision(apps: extensions, isFreeTeam: isFreeTeam, mode: rootMode)
+        result[root] = rootInfo
+        return result
+    }
+
+    /// The identifier as written when the team has it (e.g. registered by Xcode, so the build
+    /// replaces the Xcode-built app) or has neither form; the prefixed one when only that is
+    /// registered (an app xtool installed before keeps its identity and data). Opting out with
+    /// XTOOL_PREFIX_IDS=1 always gives the prefix.
+    private func identifierMode(for app: URL) async throws -> ProvisioningIdentifiers.Mode {
+        guard ProvisioningIdentifiers.preferExactIdentifiers else { return .prefixed }
+        let infoURL = app.appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: infoURL),
+              let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let bundleID = dict["CFBundleIdentifier"] as? String else {
+            throw Error.invalidApp(app)
+        }
+        let prefixed = ProvisioningIdentifiers.identifier(fromSanitized: bundleID, context: context)
+        let registered = try await DeveloperAPIPages(\.links.next) {
+            try await context.developerAPIClient.bundleIdsGetCollection().ok.body.json
+        }
+        .map(\.data)
+        .reduce(into: [], +=)
+        let identifiers = Set(registered.compactMap { $0.attributes?.identifier })
+        if identifiers.contains(bundleID) { return .exact }
+        return identifiers.contains(prefixed) ? .prefixed : .exact
+    }
+
+    private func provision(
+        apps: [URL], isFreeTeam: Bool, mode: ProvisioningIdentifiers.Mode
+    ) async throws -> [URL: ProvisioningInfo] {
+        try await withThrowingTaskGroup(
             of: (URL, ProvisioningInfo).self,
             returning: [URL: ProvisioningInfo].self
         ) { group in
             for app in apps {
                 group.addTask {
-                    let info = try await addApp(app, isFreeTeam: isFreeTeam)
+                    let info = try await addApp(app, isFreeTeam: isFreeTeam, mode: mode)
                     return (app, info)
                 }
             }

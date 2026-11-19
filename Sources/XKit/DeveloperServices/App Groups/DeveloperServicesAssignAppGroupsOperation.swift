@@ -36,17 +36,21 @@ public struct DeveloperServicesAssignAppGroupsOperation: DeveloperServicesOperat
 
     private func getOrCreateAppGroup(
         _ groupID: DeveloperServicesAppGroup.GroupID,
-        existingGroups: [String: DeveloperServicesAppGroup]
+        existingGroups: [DeveloperServicesAppGroup]
     ) async throws -> DeveloperServicesAppGroup {
         let sanitized = ProvisioningIdentifiers.sanitize(groupID: groupID)
-        let exact = ProvisioningIdentifiers.preferExactIdentifiers
-        // Same order as bundle identifiers: the group as written, an earlier prefixed
-        // one, then register as written and fall back to the prefix.
-        if exact, let existingGroup = existingGroups[groupID.rawValue] {
-            return existingGroup
+        // The group as written when registered, else an earlier xtool registration of it
+        // (group.XTL-<id>. from this or another sign-in, matched loosely as xtool always did).
+        let matches = existingGroups.filter { ProvisioningIdentifiers.sanitize(groupID: $0.groupID) == sanitized }
+        if ProvisioningIdentifiers.preferExactIdentifiers,
+           let exact = matches.first(where: { $0.groupID.rawValue == groupID.rawValue }) {
+            return exact
         }
-        if let existingGroup = existingGroups[ProvisioningIdentifiers.groupID(fromSanitized: sanitized, context: context).rawValue] {
-            return existingGroup
+        if let prefixed = matches.first(where: { ProvisioningIdentifiers.isPrefixed(groupID: $0.groupID) }) {
+            return prefixed
+        }
+        if let any = matches.first {
+            return any
         }
         func create(_ id: DeveloperServicesAppGroup.GroupID, name: String) async throws -> DeveloperServicesAppGroup {
             try await client.send(DeveloperServicesAddAppGroupRequest(
@@ -56,9 +60,9 @@ public struct DeveloperServicesAssignAppGroupsOperation: DeveloperServicesOperat
                 groupID: id
             ))
         }
-        if exact, groupID.rawValue.hasPrefix(ProvisioningIdentifiers.groupPrefix),
-           let created = try? await create(groupID, name: ProvisioningIdentifiers.safeify(identifier: groupID.rawValue)) {
-            return created
+        if ProvisioningIdentifiers.preferExactIdentifiers,
+           groupID.rawValue.hasPrefix(ProvisioningIdentifiers.groupPrefix) {
+            return try await create(groupID, name: ProvisioningIdentifiers.safeify(identifier: groupID.rawValue))
         }
         return try await create(
             ProvisioningIdentifiers.groupID(fromSanitized: sanitized, context: context),
@@ -70,10 +74,9 @@ public struct DeveloperServicesAssignAppGroupsOperation: DeveloperServicesOperat
         let existing = try await client.send(DeveloperServicesListAppGroupsRequest(
             platform: .iOS, teamID: xcodeAuthData.teamID
         ))
-        // Keyed by the registered group identifier as is.
-        let dict = Dictionary(existing.map { ($0.groupID.rawValue, $0) }, uniquingKeysWith: { $1 })
+
         let groups = try await groupIDs.concurrentMap { groupID in
-            try await getOrCreateAppGroup(groupID, existingGroups: dict)
+            try await getOrCreateAppGroup(groupID, existingGroups: existing)
         }
 
         _ = try await client.send(
