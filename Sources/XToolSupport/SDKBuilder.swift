@@ -81,7 +81,7 @@ struct SDKBuilder {
 
     // tag from https://github.com/x86sim/darwin-tools-linux-llvm: xtool-org's 1.1.0
     // with lld chained fixups for arm64_32 (watchOS), as ld64 links them
-    static let darwinToolsVersion = "1.1.0-x86sim.1"
+    static let darwinToolsVersion = "1.1.0-x86sim.2"
     // tag from https://github.com/xtool-org/OpenAppleMacros
     static let oamVersion = "1.4.1"
 
