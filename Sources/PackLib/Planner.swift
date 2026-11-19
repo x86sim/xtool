@@ -188,9 +188,13 @@ public struct Planner: Sendable {
             "CFBundleIdentifier": bundleID,
             "CFBundleName": library.name,
             "CFBundleExecutable": library.name,
-            "CFBundleDisplayName": library.name,
             "CFBundlePackageType": type.fourCharCode,
         ]
+        // Deployment targets of every declared platform; Packer picks the one for the
+        // build triple (tvOS, watchOS, visionOS) and drops this key.
+        var minOS: [String: Sendable] = [:]
+        for p in graph.root.platforms ?? [] { minOS[p.name] = p.version }
+        infoPlist["_XTLMinimumOSVersions"] = minOS
 
         switch type {
         case .application:

@@ -63,6 +63,17 @@ public struct BuildSettings: Sendable {
             self.sdkOptions += [
                 "--toolset", "\(darwinSDK.bundle.path)/toolset-swb.json",
             ]
+            // SwiftBuild passes the Darwin Swift resource directory only for iOS and
+            // macOS triples; tvOS, watchOS and visionOS would compile against the
+            // Linux toolchain's own (Dispatch module redefinitions). Pass it for all.
+            // -mlinker-version makes clang emit -platform_version (not the legacy
+            // -tvos_version_min/-watchos_version_min, which ld64.lld rejects).
+            let swiftResources = "\(darwinSDK.bundle.path)/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift"
+            self.sdkOptions += [
+                "-Xswiftc", "-resource-dir", "-Xswiftc", swiftResources,
+                "-Xcc", "-resource-dir", "-Xcc", "\(swiftResources)/clang",
+                "-Xswiftc", "-Xclang-linker", "-Xswiftc", "-mlinker-version=705",
+            ]
             self.sdkEnvironment.merge([
                 "XCODE_EXTRA_PLATFORM_FOLDERS": "\(darwinSDK.bundle.path)/Developer/Platforms",
                 // SWB looks for dsymutil in the PATH. Other stuff (lld, libtool) is handled by toolset-swb.json.

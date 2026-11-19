@@ -21,10 +21,14 @@ public struct DeveloperServicesFetchProfileOperation: DeveloperServicesOperation
     public let context: SigningContext
     public let bundleID: String
     public let signingInfo: SigningInfo
-    public init(context: SigningContext, bundleID: String, signingInfo: SigningInfo) {
+    /// tvOS apps need a TVOS_APP_DEVELOPMENT profile listing Apple TVs; every other
+    /// device platform (iPhone, iPad, Watch, Vision Pro) uses IOS_APP_DEVELOPMENT.
+    public let isTVOS: Bool
+    public init(context: SigningContext, bundleID: String, signingInfo: SigningInfo, isTVOS: Bool = false) {
         self.context = context
         self.bundleID = bundleID
         self.signingInfo = signingInfo
+        self.isTVOS = isTVOS
     }
 
     public func perform() async throws -> Mobileprovision {
@@ -65,12 +69,12 @@ public struct DeveloperServicesFetchProfileOperation: DeveloperServicesOperation
         .reduce(into: [], +=)
         .filter {
             $0.attributes?.status?.value1 != .disabled
-            && $0.attributes?.deviceClass?.value1?.supportsIOSApps == true
+            && $0.attributes?.deviceClass?.value1.map { isTVOS ? $0 == .appleTv : $0.supportsIOSApps } == true
         }
 
         try Task.checkCancellation()
 
-        let profileName = "XTL profile \(bundleID.id)"
+        let profileName = isTVOS ? "XTL tvOS profile \(bundleID.id)" : "XTL profile \(bundleID.id)"
 
         let profiles = bundleID.relationships?.profiles?.data ?? []
         if !profiles.isEmpty {
@@ -96,7 +100,7 @@ public struct DeveloperServicesFetchProfileOperation: DeveloperServicesOperation
                         _type: .profiles,
                         attributes: .init(
                             name: profileName,
-                            profileType: .init(.iosAppDevelopment)
+                            profileType: .init(isTVOS ? .tvosAppDevelopment : .iosAppDevelopment)
                         ),
                         relationships: .init(
                             bundleId: .init(
@@ -127,7 +131,7 @@ public struct DeveloperServicesFetchProfileOperation: DeveloperServicesOperation
 extension Components.Schemas.Device.AttributesPayload.DeviceClassPayload.Value1Payload {
     fileprivate var supportsIOSApps: Bool {
         switch self {
-        case .ipad, .iphone, .ipod: true
+        case .ipad, .iphone, .ipod, .appleWatch, .appleVisionPro: true
         default: false
         }
     }

@@ -163,6 +163,14 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
     /// Registers the app and creates a profile. Returns the resultant entitlements as well as
     /// the profile (note that the profile does not necessarily include all of the entitlements
     /// that the app has).
+    static func isTVOS(app: URL) -> Bool {
+        guard let data = try? Data(contentsOf: app.appendingPathComponent("Info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let platforms = plist["CFBundleSupportedPlatforms"] as? [String]
+        else { return false }
+        return platforms.contains { $0.hasPrefix("AppleTV") }
+    }
+
     private func addApp(
         _ app: URL,
         isFreeTeam: Bool
@@ -233,7 +241,8 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
         let mobileprovision = try await DeveloperServicesFetchProfileOperation(
             context: self.context,
             bundleID: newBundleID,
-            signingInfo: signingInfo
+            signingInfo: signingInfo,
+            isTVOS: Self.isTVOS(app: app)
         ).perform()
 
         return ProvisioningInfo(

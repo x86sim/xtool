@@ -135,6 +135,9 @@ struct SDKBuilder {
         let iPhoneOSSDK = try sdk(platform: "iPhoneOS", prefix: "iPhoneOS")
         let iPhoneSimSDK = try sdk(platform: "iPhoneSimulator", prefix: "iPhoneSimulator")
         let macOSSDK = try sdk(platform: "MacOSX", prefix: "MacOSX")
+        let tvOSSDK = try? sdk(platform: "AppleTVOS", prefix: "AppleTVOS")
+        let watchOSSDK = try? sdk(platform: "WatchOS", prefix: "WatchOS")
+        let xrOSSDK = try? sdk(platform: "XROS", prefix: "XROS")
 
         d.out.print("""
         - \(iPhoneOSSDK)
@@ -232,15 +235,26 @@ struct SDKBuilder {
             encoding: .utf8
         )
 
+        var extraTriples: [String: SDKDefinition.Triple] = [:]
+        if let tvOSSDK {
+            extraTriples["arm64-apple-tvos"] = triple(platform: "AppleTVOS", sdk: tvOSSDK)
+        }
+        if let watchOSSDK {
+            extraTriples["arm64_32-apple-watchos"] = triple(platform: "WatchOS", sdk: watchOSSDK)
+            extraTriples["arm64-apple-watchos"] = triple(platform: "WatchOS", sdk: watchOSSDK)
+        }
+        if let xrOSSDK {
+            extraTriples["arm64-apple-xros"] = triple(platform: "XROS", sdk: xrOSSDK)
+        }
         let sdkDefinition = SDKDefinition(
             schemaVersion: "4.0",
-            targetTriples: [
+            targetTriples: extraTriples.merging([
                 "arm64-apple-ios": triple(platform: "iPhoneOS", sdk: iPhoneOSSDK),
                 "arm64-apple-ios-simulator": triple(platform: "iPhoneSimulator", sdk: iPhoneSimSDK),
                 "x86_64-apple-ios-simulator": triple(platform: "iPhoneSimulator", sdk: iPhoneSimSDK),
                 "arm64-apple-macosx": triple(platform: "MacOSX", sdk: macOSSDK),
                 "x86_64-apple-macosx": triple(platform: "MacOSX", sdk: macOSSDK),
-            ]
+            ]) { $1 }
         )
 
         let encoder = JSONEncoder()
@@ -444,6 +458,46 @@ struct SDKBuilder {
                 -o "$output"
         fi
 
+        # Make the link match Xcode's. clang reads the SDK version for -platform_version only
+        # from -isysroot, and swiftc links with --sysroot, so lld would record the deployment
+        # target as the SDK version: take it from the -syslibroot SDK instead. Drop the rpaths
+        # the Linux Swift toolchain adds for its own back-deploy directory
+        # (<toolchain>/usr/lib/swift-<version>/<os>), and SwiftPM's @loader_path on executables;
+        # Xcode writes only /usr/lib/swift there. Dylibs keep @loader_path.
+        sdk_version=
+        if find_argument_value -syslibroot "$@" && [ -f "$argument_value/SDKSettings.json" ]; then
+            sdk_version=$(grep -o '"Version": *"[0-9.]*"' "$argument_value/SDKSettings.json" | head -n 1 | grep -o '[0-9][0-9.]*')
+        fi
+        dylib=
+        for argument do [ "$argument" = -dylib ] && dylib=1; done
+        remaining=$#
+        while [ "$remaining" -gt 0 ]; do
+            argument="$1"
+            shift
+            remaining=$((remaining - 1))
+            case "$argument" in
+                -platform_version)
+                    platform="$1" min_version="$2" sdk="$3"
+                    shift 3
+                    remaining=$((remaining - 3))
+                    set -- "$@" -platform_version "$platform" "$min_version" "${sdk_version:-$sdk}"
+                    ;;
+                -rpath)
+                    rpath="$1"
+                    shift
+                    remaining=$((remaining - 1))
+                    case "$rpath" in
+                        */lib/swift-[0-9]*) ;;
+                        @loader_path) [ -n "$dylib" ] && set -- "$@" -rpath "$rpath" ;;
+                        *) set -- "$@" -rpath "$rpath" ;;
+                    esac
+                    ;;
+                *)
+                    set -- "$@" "$argument"
+                    ;;
+            esac
+        done
+
         exec "$bin_dir/orig/ld64.lld" "$@"
         """.write(
             to: ld64,
@@ -617,9 +671,11 @@ struct SDKBuilder {
 
         d.out.print("[Finalizing SDKs]")
 
-        for platform in ["iPhoneOS", "MacOSX", "iPhoneSimulator"] {
+        for platform in SDKEntry.platforms {
             let lib = "../../../../../Library"
             let platformDir = dev.appending(path: "Platforms/\(platform).platform")
+            // tvOS, watchOS and visionOS are optional: skip them when the Xcode lacks them.
+            guard platformDir.dirExists else { continue }
 
             try patchPlatformManifest(path: platformDir.appending(path: "Info.plist"))
 
@@ -876,13 +932,17 @@ struct SDKEntry {
         return parts.dropFirst().reduce(SDKEntry(parts.first!, values)) { SDKEntry($1, [$0]) }
     }
 
+    /// Platforms copied out of Xcode. AppleTVOS, WatchOS and XROS are device-only
+    /// (no simulators) and optional.
+    static let platforms = ["iPhoneOS", "MacOSX", "iPhoneSimulator", "AppleTVOS", "WatchOS", "XROS"]
+
     static let wanted = E("Contents/Developer", [
         E("Toolchains/XcodeDefault.xctoolchain/usr/lib", [
             E("swift"),
             E("swift_static"),
             E("clang"),
         ]),
-        E("Platforms", ["iPhoneOS", "MacOSX", "iPhoneSimulator"].map {
+        E("Platforms", platforms.map {
             E("\($0).platform", [
                 E("Info.plist"),
                 E("Developer", [
