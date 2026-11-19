@@ -39,6 +39,7 @@ private struct XToolCommand: AsyncParsableCommand {
                 subcommands: [
                     DevicesCommand.self,
                     InstallCommand.self,
+                    SignCommand.self,
                     UninstallCommand.self,
                     LaunchCommand.self,
                 ]
