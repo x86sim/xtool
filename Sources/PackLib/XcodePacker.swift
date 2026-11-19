@@ -37,6 +37,8 @@ public struct XcodePacker {
             try emptyText.write(to: productDir.appendingPathComponent("empty.c"))
 
             var plist = product.infoPlist
+            plist.removeValue(forKey: Planner.minimumOSVersionsKey)
+            plist.removeValue(forKey: Planner.userInfoKeysKey)
             let families = (plist.removeValue(forKey: "UIDeviceFamily") as? [Int]) ?? [1, 2]
             plist["CFBundleExecutable"] = product.targetName
             plist["CFBundleName"] = product.targetName

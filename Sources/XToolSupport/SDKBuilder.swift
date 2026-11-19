@@ -477,12 +477,14 @@ struct SDKBuilder {
             remaining=$((remaining - 1))
             case "$argument" in
                 -platform_version)
+                    if [ "$remaining" -lt 3 ]; then set -- "$@" "$argument"; continue; fi
                     platform="$1" min_version="$2" sdk="$3"
                     shift 3
                     remaining=$((remaining - 3))
                     set -- "$@" -platform_version "$platform" "$min_version" "${sdk_version:-$sdk}"
                     ;;
                 -rpath)
+                    if [ "$remaining" -lt 1 ]; then set -- "$@" "$argument"; continue; fi
                     rpath="$1"
                     shift
                     remaining=$((remaining - 1))

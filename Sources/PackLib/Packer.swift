@@ -27,9 +27,10 @@ public struct Packer: Sendable {
 
         let packageSwift = packageDir.appendingPathComponent("Package.swift")
         // Carry the root package's tvOS/watchOS/visionOS deployment targets into the builder.
-        let declared = plan.app.infoPlist["_XTLMinimumOSVersions"] as? [String: Sendable] ?? [:]
+        // Use the same version Info.plist gets (MinimumOSVersion), so the binary and the plist agree.
+        let declared = plan.app.infoPlist[Planner.minimumOSVersionsKey] as? [String: Sendable] ?? [:]
         let extraPlatforms = [("tvos", "tvOS"), ("watchos", "watchOS"), ("visionos", "visionOS")]
-            .compactMap { key, name in (declared[key] as? String).map { ".\(name)(\"\($0)\")," } }
+            .map { key, name in ".\(name)(\"\(Self.minimumOSVersion(declared: declared, packageName: key))\")," }
             .joined(separator: " ")
         let contents = """
         // swift-tools-version: 6.0
@@ -112,21 +113,9 @@ public struct Packer: Sendable {
 
         let outputURL = output.url
 
-        let binPath: String
-        switch buildSettings.buildSystem {
-        case .swiftPM:
-            binPath = "\(buildSettings.triple)/\(buildSettings.configuration.rawValue)"
-        case .swiftBuild:
-            let platformName = Packer.sdkPlatformName(for: buildSettings.triple)
-            binPath = "out/Products/\(buildSettings.configuration.swiftBuildValue)-\(platformName)"
-        }
-        let binDir = URL(
-            fileURLWithPath: ".build/\(binPath)",
-            isDirectory: true
-        )
-
+        var binDir = Self.productsDir(for: buildSettings)
         if Self.needsWatchArm64Slice(triple: buildSettings.triple) {
-            try await addWatchArm64Slice(binDir: binDir)
+            binDir = try await universalWatchProducts(arm64_32Dir: binDir)
         }
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -222,8 +211,12 @@ public struct Packer: Sendable {
         group.addTask {
             var info = product.infoPlist
 
-            let minOS = info.removeValue(forKey: "_XTLMinimumOSVersions") as? [String: Sendable] ?? [:]
-            Packer.applyPlatformKeys(to: &info, triple: buildSettings.triple, minOS: minOS, isApp: product.type == .application)
+            let minOS = info.removeValue(forKey: Planner.minimumOSVersionsKey) as? [String: Sendable] ?? [:]
+            let userKeys = Set(info.removeValue(forKey: Planner.userInfoKeysKey) as? [String] ?? [])
+            Packer.applyPlatformKeys(
+                to: &info, triple: buildSettings.triple, minOS: minOS,
+                isApp: product.type == .application, userKeys: userKeys
+            )
             for (key, value) in Packer.buildEnvironmentKeys(triple: buildSettings.triple) where info[key] == nil {
                 info[key] = value
             }
@@ -256,56 +249,77 @@ public struct Packer: Sendable {
             && ProcessInfo.processInfo.environment["XTOOL_WATCHOS_ARM64"] != "0"
     }
 
-    /// Builds the arm64 slice after the arm64_32 one and merges every Mach-O product
-    /// in binDir (executables, dylibs, framework binaries) with lipo. SwiftBuild
-    /// writes both architectures to the same Products directory, so the arm64_32
-    /// products are set aside first.
-    private func addWatchArm64Slice(binDir: URL) async throws {
+    /// Where a build leaves its products.
+    static func productsDir(for settings: BuildSettings) -> URL {
+        let binPath: String
+        switch settings.buildSystem {
+        case .swiftPM:
+            binPath = "\(settings.triple)/\(settings.configuration.rawValue)"
+        case .swiftBuild:
+            let platformName = Packer.sdkPlatformName(for: settings.triple)
+            binPath = "out/Products/\(settings.configuration.swiftBuildValue)-\(platformName)"
+        }
+        return URL(fileURLWithPath: ".build/\(binPath)", isDirectory: true)
+    }
+
+    /// Copies the arm64_32 products aside, builds the arm64 slice, and merges every
+    /// Mach-O product (executables, dylibs, framework binaries) with lipo into the copy,
+    /// which is what gets packed. The build's own products dir is never rewritten, so an
+    /// incremental rebuild cannot take a merged binary for its own output.
+    private func universalWatchProducts(arm64_32Dir: URL) async throws -> URL {
         let fm = FileManager.default
-        let stash = try TemporaryDirectory(name: "arm64_32")
+        let merged = URL(fileURLWithPath: ".build/xtool-watchos-universal", isDirectory: true)
+        try? fm.removeItem(at: merged)
+        try fm.copyItem(at: arm64_32Dir, to: merged)
+
         var thin: [String] = []
-        for name in (try? fm.contentsOfDirectory(atPath: binDir.path)) ?? [] {
-            var rel = name
-            if name.hasSuffix(".framework") {
-                rel = "\(name)/\(name.dropLast(".framework".count))"
+        for name in (try? fm.contentsOfDirectory(atPath: merged.path)) ?? [] {
+            let rel = name.hasSuffix(".framework") ? "\(name)/\(name.dropLast(".framework".count))" : name
+            guard let cpuType = Self.thinMachOCPUType(merged.appendingPathComponent(rel)) else { continue }
+            guard cpuType == Self.cpuTypeARM64_32 else {
+                throw StringError("\(rel) in \(arm64_32Dir.path) is not arm64_32; remove .build and build again")
             }
-            let file = binDir.appendingPathComponent(rel)
-            guard Self.isThinMachO(file) else { continue }
-            let dest = stash.url.appendingPathComponent(rel)
-            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fm.copyItem(at: file, to: dest)
             thin.append(rel)
         }
-        let arm64Triple = "arm64" + buildSettings.triple.dropFirst("arm64_32".count)
+
         let arm64Settings = try await BuildSettings(
             configuration: buildSettings.configuration,
-            triple: String(arm64Triple),
+            triple: "arm64" + buildSettings.triple.dropFirst("arm64_32".count),
             buildSystem: buildSettings.buildSystem,
             packagePath: buildSettings.packagePath,
             options: buildSettings.customOptions
         )
         try await build(arm64Settings)
+        let arm64Dir = Self.productsDir(for: arm64Settings)
+
+        let lipo = ProcessInfo.processInfo.environment["LIPO"] ?? "llvm-lipo"
         for rel in thin {
-            let arm64File = binDir.appendingPathComponent(rel)
-            guard fm.fileExists(atPath: arm64File.path) else { continue }
-            let merged = stash.url.appendingPathComponent(rel + ".universal")
-            let lipo = ProcessInfo.processInfo.environment["LIPO"] ?? "llvm-lipo"
+            let arm64File = arm64Dir.appendingPathComponent(rel)
+            guard Self.thinMachOCPUType(arm64File) == Self.cpuTypeARM64 else { continue }
+            let file = merged.appendingPathComponent(rel)
+            let output = merged.appendingPathComponent(rel + ".universal")
             try await Subprocess.run(
                 .name(lipo),
-                arguments: ["-create", stash.url.appendingPathComponent(rel).path, arm64File.path, "-output", merged.path],
+                arguments: ["-create", file.path, arm64File.path, "-output", output.path],
                 output: .currentStandardOutput,
                 error: .currentStandardError,
             ).checkSuccess()
-            try fm.removeItem(at: arm64File)
-            try fm.moveItem(at: merged, to: arm64File)
+            try fm.removeItem(at: file)
+            try fm.moveItem(at: output, to: file)
         }
+        return merged
     }
 
-    private static func isThinMachO(_ url: URL) -> Bool {
+    private static let cpuTypeARM64: UInt32 = 0x0100_000C
+    private static let cpuTypeARM64_32: UInt32 = 0x0200_000C
+
+    /// The cputype of a thin (non-fat) Mach-O file, or nil.
+    private static func thinMachOCPUType(_ url: URL) -> UInt32? {
         guard let handle = try? FileHandle(forReadingFrom: url),
-              let bytes = try? handle.read(upToCount: 4), bytes.count == 4 else { return false }
+              let bytes = try? handle.read(upToCount: 8), bytes.count == 8 else { return nil }
         let magic = bytes.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
-        return magic == 0xfeedface || magic == 0xfeedfacf
+        guard magic == 0xfeedface || magic == 0xfeedfacf else { return nil }
+        return bytes.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }
     }
 
     /// The OS component of an Apple triple without its version: ios, tvos, watchos, xros, macosx.
@@ -328,8 +342,6 @@ public struct Packer: Sendable {
         }
     }
 
-    /// Info.plist keys Xcode sets per platform. Values from the user's Info.plist
-    /// (already merged into `info`) win, except the iOS-only defaults the planner adds.
     /// The DT* keys Xcode writes from the SDK and Xcode it built with (App Store
     /// processing reads them). Read from the installed Darwin SDK and the Xcode
     /// version plist `xtool sdk install` keeps next to the .xtoolsdk. Empty when
@@ -369,10 +381,14 @@ public struct Packer: Sendable {
         ]
         let cache = ProcessInfo.processInfo.environment["SDK_CACHE"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/xtool")
-        let xcodePlist = ((try? FileManager.default.contentsOfDirectory(atPath: cache.path)) ?? [])
-            .filter { $0.hasPrefix("darwin-") && $0.hasSuffix(".xtoolsdk.version.plist") }
-            .sorted().last
-            .flatMap { try? Data(contentsOf: cache.appendingPathComponent($0)) }
+        // The plist of the Xcode the installed SDK came from: it is named after that
+        // SDK's iPhoneOS SDK (darwin-iPhoneOS27.2.xtoolsdk.version.plist).
+        let iPhoneOSSDKs = sdk.bundle.appendingPathComponent("Developer/Platforms/iPhoneOS.platform/Developer/SDKs")
+        let iPhoneOSName = ((try? FileManager.default.contentsOfDirectory(atPath: iPhoneOSSDKs.path)) ?? [])
+            .first { $0.hasPrefix("iPhoneOS") && $0 != "iPhoneOS.sdk" && $0.hasSuffix(".sdk") }
+            .map { String($0.dropLast(".sdk".count)) }
+        let xcodePlist = iPhoneOSName
+            .flatMap { try? Data(contentsOf: cache.appendingPathComponent("darwin-\($0).xtoolsdk.version.plist")) }
             .flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
         if let xcodePlist,
            let xcodeVersion = xcodePlist["CFBundleShortVersionString"] as? String,
@@ -391,35 +407,54 @@ public struct Packer: Sendable {
         #endif
     }
 
-    static func applyPlatformKeys(to info: inout [String: Sendable], triple: String, minOS: [String: Sendable], isApp: Bool) {
+    /// The deployment target for a tvOS, watchOS or visionOS build: the root package's,
+    /// else xtool's minimum for that platform.
+    static func minimumOSVersion(declared: [String: Sendable], packageName: String) -> String {
+        declared[packageName] as? String
+            ?? ["tvos": "17.0", "watchos": "10.0", "visionos": "1.0"][packageName] ?? "1.0"
+    }
+
+    /// Info.plist keys Xcode sets per platform. CFBundleSupportedPlatforms, DTPlatformName
+    /// and (except on watchOS and visionOS) UIRequiredDeviceCapabilities are always set, as
+    /// xtool always did for iOS; the other platform keys are defaults that keys from the
+    /// project's own Info.plist (`userKeys`) override.
+    static func applyPlatformKeys(
+        to info: inout [String: Sendable], triple: String, minOS: [String: Sendable],
+        isApp: Bool, userKeys: Set<String> = []
+    ) {
+        func set(_ key: String, _ value: Sendable) {
+            if !userKeys.contains(key) { info[key] = value }
+        }
+        func remove(_ keys: [String]) {
+            for key in keys where !userKeys.contains(key) { info.removeValue(forKey: key) }
+        }
         let os = osName(for: triple)
         // SwiftPM platform names in Package.swift
-        let packageName = ["tvos": "tvos", "watchos": "watchos", "xros": "visionos", "visionos": "visionos"][os]
-        if let packageName {
-            info["MinimumOSVersion"] = minOS[packageName]
-                ?? ["tvos": "17.0", "watchos": "10.0", "visionos": "1.0"][packageName]!
+        if let packageName = ["tvos": "tvos", "watchos": "watchos", "xros": "visionos", "visionos": "visionos"][os] {
+            set("MinimumOSVersion", minimumOSVersion(declared: minOS, packageName: packageName))
         }
         info["CFBundleSupportedPlatforms"] = cfBundleSupportedPlatforms(for: triple)
         info["DTPlatformName"] = sdkPlatformName(for: triple)
         guard isApp else { return }
-        if os != "watchos" && os != "xros" && os != "visionos" { info["UIRequiredDeviceCapabilities"] = ["arm64"] }
+        let orientations = ["UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"]
         switch os {
         case "tvos":
-            info["UIDeviceFamily"] = [3]
-            info["LSRequiresIPhoneOS"] = true
-            for k in ["UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"] { info.removeValue(forKey: k) }
+            info["UIRequiredDeviceCapabilities"] = ["arm64"]
+            set("UIDeviceFamily", [3])
+            set("LSRequiresIPhoneOS", true)
+            remove(orientations)
         case "watchos":
-            info["UIDeviceFamily"] = [4]
             info.removeValue(forKey: "UIRequiredDeviceCapabilities")
-            if info["WKApplication"] == nil { info["WKApplication"] = true }
-            if info["WKRunsIndependentlyOfCompanionApp"] == nil { info["WKRunsIndependentlyOfCompanionApp"] = true }
+            set("UIDeviceFamily", [4])
+            set("WKApplication", true)
+            set("WKRunsIndependentlyOfCompanionApp", true)
             // Xcode 27 writes this for every watchOS app.
-            if info["MinimumOSVersion~ipad"] == nil { info["MinimumOSVersion~ipad"] = "9.0" }
-            for k in ["UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"] { info.removeValue(forKey: k) }
+            set("MinimumOSVersion~ipad", "9.0")
+            remove(orientations)
         case "xros", "visionos":
-            info["UIDeviceFamily"] = [7]
             info.removeValue(forKey: "UIRequiredDeviceCapabilities")
-            for k in ["UISupportedInterfaceOrientations", "UISupportedInterfaceOrientations~ipad"] { info.removeValue(forKey: k) }
+            set("UIDeviceFamily", [7])
+            remove(orientations)
         default:
             info["UIRequiredDeviceCapabilities"] = ["arm64"]
             info["LSRequiresIPhoneOS"] = true

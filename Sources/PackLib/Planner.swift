@@ -3,6 +3,12 @@ import XUtils
 import Subprocess
 
 public struct Planner: Sendable {
+    /// Private Info.plist entries the planner hands to the packers; never written out.
+    /// The deployment target of every platform the root package declares.
+    static let minimumOSVersionsKey = "_XTLMinimumOSVersions"
+    /// The keys the project's own Info.plist set; those win over platform defaults.
+    static let userInfoKeysKey = "_XTLUserInfoKeys"
+
     public var buildSettings: BuildSettings
     public var schema: PackSchema
 
@@ -194,7 +200,7 @@ public struct Planner: Sendable {
         // build triple (tvOS, watchOS, visionOS) and drops this key.
         var minOS: [String: Sendable] = [:]
         for p in graph.root.platforms ?? [] { minOS[p.name] = p.version }
-        infoPlist["_XTLMinimumOSVersions"] = minOS
+        infoPlist[Self.minimumOSVersionsKey] = minOS
 
         switch type {
         case .application:
@@ -217,6 +223,7 @@ public struct Planner: Sendable {
             let info = try PropertyListSerialization.propertyList(from: data, format: nil)
             if let info = info as? [String: Sendable] {
                 infoPlist.merge(info, uniquingKeysWith: { $1 })
+                infoPlist[Self.userInfoKeysKey] = Array(info.keys)
             } else {
                 throw StringError("Info.plist has invalid format: expected a dictionary.")
             }
