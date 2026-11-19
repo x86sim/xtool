@@ -448,13 +448,13 @@ public struct Packer: Sendable {
             set("UIDeviceFamily", [4])
             set("WKApplication", true)
             // A watch app without a companion iPhone app must say so (installd refuses it
-            // otherwise: "must specify WKCompanionAppBundleIdentifier"), as Xcode's watch-only
-            // template does. One that names its companion runs independently of it.
+            // otherwise: "must specify WKCompanionAppBundleIdentifier").
+            // Xcode's watch-only template sets both keys. Signing an app embedded as
+            // Watch/<Name>.app sets its companion and removes WKWatchOnly.
             if info["WKCompanionAppBundleIdentifier"] == nil {
                 set("WKWatchOnly", true)
-            } else {
-                set("WKRunsIndependentlyOfCompanionApp", true)
             }
+            set("WKRunsIndependentlyOfCompanionApp", true)
             // Xcode 27 writes this for every watchOS app.
             set("MinimumOSVersion~ipad", "9.0")
             remove(orientations)

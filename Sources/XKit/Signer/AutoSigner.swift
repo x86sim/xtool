@@ -71,6 +71,22 @@ public struct AutoSigner {
                 else { throw Error.errorReading(infoPlist.lastPathComponent) }
             let nsDict = NSMutableDictionary(dictionary: dict)
             nsDict["CFBundleIdentifier"] = info.newBundleID
+            // A companion watch app (Watch/<Name>.app) names the iPhone app by its final
+            // identifier and is not watch-only; its extensions name the watch app.
+            let rootComponents = app.standardizedFileURL.pathComponents
+            let relative = Array(url.standardizedFileURL.pathComponents.dropFirst(rootComponents.count))
+            if relative.count == 2, relative[0] == "Watch" {
+                nsDict["WKCompanionAppBundleIdentifier"] = mainInfo.newBundleID
+                nsDict.removeObject(forKey: "WKWatchOnly")
+            } else if relative.count == 4, relative[0] == "Watch",
+                      let watchInfo = provisioningDict[url.deletingLastPathComponent().deletingLastPathComponent()],
+                      var ext = nsDict["NSExtension"] as? [String: Any],
+                      var attributes = ext["NSExtensionAttributes"] as? [String: Any],
+                      attributes["WKAppBundleIdentifier"] != nil {
+                attributes["WKAppBundleIdentifier"] = watchInfo.newBundleID
+                ext["NSExtensionAttributes"] = attributes
+                nsDict["NSExtension"] = ext
+            }
             guard nsDict.write(to: infoPlist, atomically: true) else {
                 throw Error.errorWriting(infoPlist.lastPathComponent)
             }
