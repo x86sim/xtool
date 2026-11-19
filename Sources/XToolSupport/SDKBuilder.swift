@@ -77,7 +77,7 @@ struct SDKBuilder {
     let mode: Mode
 
     // bump this when the sdk builder logic changes
-    static let sdkEpoch = 5
+    static let sdkEpoch = 6
 
     // tag from https://github.com/x86sim/darwin-tools-linux-llvm: xtool-org's 1.1.0
     // with lld chained fixups for arm64_32 (watchOS), as ld64 links them
@@ -139,6 +139,9 @@ struct SDKBuilder {
         let tvOSSDK = try? sdk(platform: "AppleTVOS", prefix: "AppleTVOS")
         let watchOSSDK = try? sdk(platform: "WatchOS", prefix: "WatchOS")
         let xrOSSDK = try? sdk(platform: "XROS", prefix: "XROS")
+        let tvSimSDK = try? sdk(platform: "AppleTVSimulator", prefix: "AppleTVSimulator")
+        let watchSimSDK = try? sdk(platform: "WatchSimulator", prefix: "WatchSimulator")
+        let xrSimSDK = try? sdk(platform: "XRSimulator", prefix: "XRSimulator")
 
         d.out.print("""
         - \(iPhoneOSSDK)
@@ -246,6 +249,16 @@ struct SDKBuilder {
         }
         if let xrOSSDK {
             extraTriples["arm64-apple-xros"] = triple(platform: "XROS", sdk: xrOSSDK)
+        }
+        if let tvSimSDK {
+            extraTriples["arm64-apple-tvos-simulator"] = triple(platform: "AppleTVSimulator", sdk: tvSimSDK)
+            extraTriples["x86_64-apple-tvos-simulator"] = triple(platform: "AppleTVSimulator", sdk: tvSimSDK)
+        }
+        if let watchSimSDK {
+            extraTriples["arm64-apple-watchos-simulator"] = triple(platform: "WatchSimulator", sdk: watchSimSDK)
+        }
+        if let xrSimSDK {
+            extraTriples["arm64-apple-xros-simulator"] = triple(platform: "XRSimulator", sdk: xrSimSDK)
         }
         let sdkDefinition = SDKDefinition(
             schemaVersion: "4.0",
@@ -935,9 +948,12 @@ struct SDKEntry {
         return parts.dropFirst().reduce(SDKEntry(parts.first!, values)) { SDKEntry($1, [$0]) }
     }
 
-    /// Platforms copied out of Xcode. AppleTVOS, WatchOS and XROS are device-only
-    /// (no simulators) and optional.
-    static let platforms = ["iPhoneOS", "MacOSX", "iPhoneSimulator", "AppleTVOS", "WatchOS", "XROS"]
+    /// Platforms copied out of Xcode. The tvOS, watchOS and visionOS ones (devices and
+    /// simulators) are optional.
+    static let platforms = [
+        "iPhoneOS", "MacOSX", "iPhoneSimulator", "AppleTVOS", "WatchOS", "XROS",
+        "AppleTVSimulator", "WatchSimulator", "XRSimulator",
+    ]
 
     static let wanted = E("Contents/Developer", [
         E("Toolchains/XcodeDefault.xctoolchain/usr/lib", [

@@ -289,6 +289,19 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
             guard plugins.dirExists else { continue }
             apps += plugins.implicitContents.filter { $0.pathExtension.lowercased() == "appex" }
         }
+        // A companion watch app (Watch/<Name>.app, identifier <app id>.watchkitapp) and its
+        // extensions get their own App IDs and profiles like the app's extensions.
+        let watch = root.appendingPathComponent("Watch")
+        if watch.dirExists {
+            for watchApp in watch.implicitContents where watchApp.pathExtension.lowercased() == "app" {
+                apps.append(watchApp)
+                for pluginsDir in ["PlugIns", "Extensions"] {
+                    let plugins = watchApp.appendingPathComponent(pluginsDir)
+                    guard plugins.dirExists else { continue }
+                    apps += plugins.implicitContents.filter { $0.pathExtension.lowercased() == "appex" }
+                }
+            }
+        }
 
         let isFreeTeam = try await context.auth.team()?.isFree == true
 

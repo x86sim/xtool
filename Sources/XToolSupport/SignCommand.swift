@@ -19,6 +19,13 @@ struct SignCommand: AsyncParsableCommand {
         help: "The .app to sign"
     ) var path: String
 
+    @Option(help: ArgumentHelp(
+        "Register this device (UDID) with the team before signing",
+        discussion: "Development profiles list the team's registered devices. Use it once per new device, e.g. one reached only over the network."
+    )) var udid: String?
+
+    @Option(help: "Name for the device registered with --udid") var deviceName: String?
+
     func run() async throws {
         guard let token = try AuthToken.savedIfPresent() else {
             throw Console.Error("`sign` requires logging in with `xtool auth`")
@@ -34,7 +41,8 @@ struct SignCommand: AsyncParsableCommand {
         )
         do {
             defer { d.out.print() }
-            let bundleID = try await installer.signInPlace(app: url)
+            let target = udid.map { SigningContext.TargetDevice(udid: $0, name: deviceName ?? $0) }
+            let bundleID = try await installer.signInPlace(app: url, targetDevice: target)
             d.out.print("Signed \(url.lastPathComponent) as \(bundleID)")
         } catch let error as CancellationError {
             throw error
