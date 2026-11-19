@@ -26,6 +26,14 @@ extension ProvisioningIdentifiers {
         return "\(Self.idPrefix)\(uuid).\(sanitized)"
     }
 
+    /// Whether to register identifiers exactly as the project spells them, like Xcode.
+    /// xtool's default prefix (XTL-<id>.) only avoids collisions with identifiers another
+    /// team owns; the exact identifier is tried first and the prefix is the fallback.
+    /// XTOOL_PREFIX_IDS=1 always prefixes, as xtool did before.
+    static var preferExactIdentifiers: Bool {
+        ProcessInfo.processInfo.environment["XTOOL_PREFIX_IDS"] != "1"
+    }
+
     static func safeify(identifier: String) -> String {
         identifier.replacingOccurrences(of: ".", with: " ")
     }

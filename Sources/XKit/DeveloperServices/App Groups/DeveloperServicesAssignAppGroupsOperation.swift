@@ -39,26 +39,39 @@ public struct DeveloperServicesAssignAppGroupsOperation: DeveloperServicesOperat
         existingGroups: [String: DeveloperServicesAppGroup]
     ) async throws -> DeveloperServicesAppGroup {
         let sanitized = ProvisioningIdentifiers.sanitize(groupID: groupID)
-        if let existingGroup = existingGroups[sanitized] {
+        let exact = ProvisioningIdentifiers.preferExactIdentifiers
+        // Same order as bundle identifiers: the group as written, an earlier prefixed
+        // one, then register as written and fall back to the prefix.
+        if exact, let existingGroup = existingGroups[groupID.rawValue] {
             return existingGroup
         }
-        let groupID = ProvisioningIdentifiers.groupID(fromSanitized: sanitized, context: context)
-        let name = ProvisioningIdentifiers.groupName(fromSanitized: sanitized)
-        let request = DeveloperServicesAddAppGroupRequest(
-            platform: .iOS,
-            teamID: xcodeAuthData.teamID,
-            name: name,
-            groupID: groupID
+        if let existingGroup = existingGroups[ProvisioningIdentifiers.groupID(fromSanitized: sanitized, context: context).rawValue] {
+            return existingGroup
+        }
+        func create(_ id: DeveloperServicesAppGroup.GroupID, name: String) async throws -> DeveloperServicesAppGroup {
+            try await client.send(DeveloperServicesAddAppGroupRequest(
+                platform: .iOS,
+                teamID: xcodeAuthData.teamID,
+                name: name,
+                groupID: id
+            ))
+        }
+        if exact, groupID.rawValue.hasPrefix(ProvisioningIdentifiers.groupPrefix),
+           let created = try? await create(groupID, name: ProvisioningIdentifiers.safeify(identifier: groupID.rawValue)) {
+            return created
+        }
+        return try await create(
+            ProvisioningIdentifiers.groupID(fromSanitized: sanitized, context: context),
+            name: ProvisioningIdentifiers.groupName(fromSanitized: sanitized)
         )
-        return try await client.send(request)
     }
 
     public func perform() async throws -> [DeveloperServicesAppGroup.GroupID] {
         let existing = try await client.send(DeveloperServicesListAppGroupsRequest(
             platform: .iOS, teamID: xcodeAuthData.teamID
         ))
-        let sanitized = existing.map { (ProvisioningIdentifiers.sanitize(groupID: $0.groupID), $0) }
-        let dict = Dictionary(sanitized, uniquingKeysWith: { $1 })
+        // Keyed by the registered group identifier as is.
+        let dict = Dictionary(existing.map { ($0.groupID.rawValue, $0) }, uniquingKeysWith: { $1 })
         let groups = try await groupIDs.concurrentMap { groupID in
             try await getOrCreateAppGroup(groupID, existingGroups: dict)
         }

@@ -50,21 +50,23 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
         entitlements: Entitlements,
         isFreeTeam: Bool
     ) async throws -> Components.Schemas.BundleId {
-        let newBundleID = ProvisioningIdentifiers.identifier(fromSanitized: bundleID, context: self.context)
+        let prefixedBundleID = ProvisioningIdentifiers.identifier(fromSanitized: bundleID, context: self.context)
+        let exact = ProvisioningIdentifiers.preferExactIdentifiers
 
-        let existing = try await context.developerAPIClient
+        let registered = try await context.developerAPIClient
             .bundleIdsGetCollection(query: .init(
-                filter_lbrack_identifier_rbrack_: [bundleID]
+                filter_lbrack_identifier_rbrack_: exact ? [bundleID, prefixedBundleID] : [bundleID]
             ))
             .ok.body.json.data
-            // filter[identifier] is a prefix filter so we need to manually upgrade to equality
-            .first(where: { $0.attributes?.identifier == newBundleID })
+        // filter[identifier] is a prefix filter so we need to manually upgrade to equality
+        func registeredID(_ identifier: String) -> Components.Schemas.BundleId? {
+            registered.first { $0.attributes?.identifier == identifier }
+        }
 
-        let appID: Components.Schemas.BundleId
-        if let existing {
-            appID = existing
-        } else {
-            let name = ProvisioningIdentifiers.appName(fromSanitized: bundleID)
+        func create(_ identifier: String) async throws -> Components.Schemas.BundleId {
+            let name = identifier == bundleID
+                ? ProvisioningIdentifiers.safeify(identifier: bundleID)
+                : ProvisioningIdentifiers.appName(fromSanitized: bundleID)
             let createResponse = try await context.developerAPIClient.bundleIdsCreateInstance(
                 body: .json(
                     .init(
@@ -73,13 +75,27 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
                             attributes: .init(
                                 name: name,
                                 platform: .init(.ios),
-                                identifier: newBundleID
+                                identifier: identifier
                             )
                         )
                     )
                 )
             )
-            appID = try createResponse.created.body.json.data
+            return try createResponse.created.body.json.data
+        }
+
+        // The exact identifier when the team has it (e.g. registered by Xcode) or can
+        // register it, so the app installs over the Xcode-built one; an earlier
+        // prefixed registration keeps existing xtool installs and their data.
+        let appID: Components.Schemas.BundleId
+        if exact, let existing = registeredID(bundleID) {
+            appID = existing
+        } else if let existing = registeredID(prefixedBundleID) {
+            appID = existing
+        } else if exact, let created = try? await create(bundleID) {
+            appID = created
+        } else {
+            appID = try await create(prefixedBundleID)
         }
 
         let existingCapabilitiesList = try await context.developerAPIClient
